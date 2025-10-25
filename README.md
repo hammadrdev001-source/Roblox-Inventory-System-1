@@ -20,5 +20,5 @@ Perfect as a base for adventure or RPG-style games.
 3. Open the Output console to see inventory actions logged.
 
 ## 🧠 Author
-**YourName** — Roblox Lua Scripter  
+ Zyntrax: My real name is Hammad — Roblox Lua Scripter  
 HiddenDevs Portfolio Demo
