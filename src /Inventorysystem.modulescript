@@ -1,0 +1,421 @@
+local Players = game:GetService("Players")
+local DataStoreService = game:GetService("DataStoreService")
+local HttpService = game:GetService("HttpService")
+
+local Store = DataStoreService:GetDataStore("AdvInv_V1")
+local Global = {}
+
+local Inv = {}
+Inv.__index = Inv
+
+function Inv.new(player)
+    local self = setmetatable({}, Inv)
+    self.Player = player
+    self.Items = {}
+    self.Meta = {}
+    self.Modifiers = {}
+    self.Durability = {}
+    self.Weight = 0
+    self.MaxWeight = 350
+    self.Slots = 70
+    self.Equipped = {Weapon=nil,Armor=nil,Accessory=nil,Extra=nil}
+    self.Cooldowns = {}
+    self.Buffs = {}
+    self.Bank = {}
+    self.BankWeight = 0
+    self.BankMax = 1000
+    self.CraftQueue = {}
+    self.Backups = {}
+    self.Interval = 120
+    self.LastSave = os.clock()
+    self.AutoSave = true
+    self.Bind = Instance.new("BindableEvent")
+    task.spawn(function() self:Loop() end)
+    return self
+end
+
+function Inv:List()
+    local t = {}
+    for k in pairs(self.Items) do
+        table.insert(t,k)
+    end
+    return t
+end
+
+function Inv:ListBank()
+    local t = {}
+    for k in pairs(self.Bank) do
+        table.insert(t,k)
+    end
+    return t
+end
+
+function Inv:Count()
+    local c = 0
+    for _,v in pairs(self.Items) do
+        c += v
+    end
+    return c
+end
+
+function Inv:CountBank()
+    local c = 0
+    for _,v in pairs(self.Bank) do
+        c += v
+    end
+    return c
+end
+
+function Inv:Has(name,qty)
+    return (self.Items[name] or 0) >= (qty or 1)
+end
+
+function Inv:HasBank(name,qty)
+    return (self.Bank[name] or 0) >= (qty or 1)
+end
+
+function Inv:Add(name,qty,meta)
+    qty = qty or 1
+    meta = meta or {}
+    if not self.Items[name] and #self:List() >= self.Slots then return false end
+    local w = meta.weight or (self.Meta[name] and self.Meta[name].weight) or 1
+    if self.Weight + w*qty > self.MaxWeight then return false end
+    self.Items[name] = (self.Items[name] or 0) + qty
+    self.Meta[name] = self.Meta[name] or meta
+    self.Weight += w*qty
+    if meta.durability then
+        self.Durability[name] = meta.durability
+    end
+    if meta.modifier then
+        self.Modifiers[name] = meta.modifier
+    end
+    self.Bind:Fire("Add",name,qty)
+    if self.AutoSave then self:Save() end
+    return true
+end
+
+function Inv:AddBank(name,qty,meta)
+    qty = qty or 1
+    meta = meta or self.Meta[name] or {}
+    local w = meta.weight or 1
+    if self.BankWeight + w*qty > self.BankMax then return false end
+    self.Bank[name] = (self.Bank[name] or 0) + qty
+    self.BankWeight += w*qty
+    return true
+end
+
+function Inv:Remove(name,qty)
+    qty = qty or 1
+    if not self.Items[name] then return false end
+    local m = self.Meta[name] or {}
+    local w = m.weight or 1
+    self.Items[name] -= qty
+    self.Weight -= w*qty
+    if self.Items[name] <= 0 then
+        self.Items[name] = nil
+        self.Meta[name] = nil
+        self.Durability[name] = nil
+        self.Modifiers[name] = nil
+    end
+    self.Bind:Fire("Remove",name,qty)
+    if self.AutoSave then self:Save() end
+    return true
+end
+
+function Inv:RemoveBank(name,qty)
+    qty = qty or 1
+    if not self.Bank[name] then return false end
+    local m = self.Meta[name] or {}
+    local w = m.weight or 1
+    self.Bank[name] -= qty
+    self.BankWeight -= w*qty
+    if self.Bank[name] <= 0 then
+        self.Bank[name] = nil
+    end
+    return true
+end
+
+function Inv:Deposit(name,qty)
+    if not self:Has(name,qty) then return false end
+    local m = self.Meta[name]
+    if not self:AddBank(name,qty,m) then return false end
+    self:Remove(name,qty)
+    return true
+end
+
+function Inv:Withdraw(name,qty)
+    if not self:HasBank(name,qty) then return false end
+    local m = self.Meta[name]
+    if not self:Add(name,qty,m) then return false end
+    self:RemoveBank(name,qty)
+    return true
+end
+
+function Inv:Cooldown(name)
+    local t = self.Cooldowns[name]
+    return t and os.clock() < t
+end
+
+function Inv:SetCooldown(name,sec)
+    self.Cooldowns[name] = os.clock() + sec
+end
+
+function Inv:Use(name)
+    if not self:Has(name,1) then return false end
+    local m = self.Meta[name]
+    if not m then return false end
+    if m.type == "Consumable" then
+        if self:Cooldown(name) then return false end
+        self:SetCooldown(name,m.cooldown or 3)
+        if m.effect then
+            pcall(function() m.effect(self.Player) end)
+        end
+        self:Remove(name,1)
+        return true
+    end
+    return false
+end
+
+function Inv:Equip(name)
+    if not self:Has(name,1) then return false end
+    local m = self.Meta[name]
+    if not m or not m.slot then return false end
+    local slot = m.slot
+    if self.Equipped[slot] then
+        self:Unequip(slot)
+    end
+    self.Equipped[slot] = name
+    self:ApplyBuffs(name)
+    return true
+end
+
+function Inv:Unequip(slot)
+    local item = self.Equipped[slot]
+    if not item then return false end
+    self:RemoveBuffs(item)
+    self.Equipped[slot] = nil
+    return true
+end
+
+function Inv:DurabilityLoss(name,amt)
+    if not self.Durability[name] then return end
+    self.Durability[name] -= amt
+    if self.Durability[name] <= 0 then
+        self:Remove(name,1)
+    end
+end
+
+function Inv:ApplyBuffs(name)
+    local mod = self.Modifiers[name]
+    if not mod then return end
+    for stat,v in pairs(mod) do
+        self.Buffs[stat] = (self.Buffs[stat] or 0) + v
+    end
+end
+
+function Inv:RemoveBuffs(name)
+    local mod = self.Modifiers[name]
+    if not mod then return end
+    for stat,v in pairs(mod) do
+        self.Buffs[stat] -= v
+        if self.Buffs[stat] <= 0 then self.Buffs[stat] = nil end
+    end
+end
+
+function Inv:Backup()
+    table.insert(self.Backups,{
+        items=table.clone(self.Items),
+        meta=table.clone(self.Meta),
+        mods=table.clone(self.Modifiers),
+        dura=table.clone(self.Durability),
+        eq=table.clone(self.Equipped),
+        buff=table.clone(self.Buffs),
+        weight=self.Weight
+    })
+    if #self.Backups > 10 then
+        table.remove(self.Backups,1)
+    end
+end
+
+function Inv:Restore(i)
+    local b = self.Backups[i]
+    if not b then return false end
+    self.Items = table.clone(b.items)
+    self.Meta = table.clone(b.meta)
+    self.Modifiers = table.clone(b.mods)
+    self.Durability = table.clone(b.dura)
+    self.Equipped = table.clone(b.eq)
+    self.Buffs = table.clone(b.buff)
+    self.Weight = b.weight
+    return true
+end
+
+function Inv:Search(q)
+    local r = {}
+    q = string.lower(q)
+    for n in pairs(self.Items) do
+        if string.find(string.lower(n),q) then
+            table.insert(r,n)
+        end
+    end
+    return r
+end
+
+function Inv:Page(num,size)
+    size = size or 10
+    local list = self:List()
+    local start = (num-1)*size+1
+    local ending = math.min(#list,start+size-1)
+    local out = {}
+    for i=start,ending do
+        out[list[i]] = self.Items[list[i]]
+    end
+    return out
+end
+
+function Inv:Loot(tbl)
+    local r = math.random()
+    local c = 0
+    for _,t in ipairs(tbl) do
+        c += t.chance
+        if r <= c then
+            self:Add(t.name,t.amount or 1,t.meta or {})
+            break
+        end
+    end
+end
+
+function Inv:Craft(id,def)
+    for n,req in pairs(def.requirements) do
+        if not self:Has(n,req) then return false end
+    end
+    for n,req in pairs(def.requirements) do
+        self:Remove(n,req)
+    end
+    table.insert(self.CraftQueue,{
+        id=id,
+        time=os.clock()+(def.time or 5),
+        out=def.output
+    })
+    return true
+end
+
+function Inv:CraftTick()
+    local now = os.clock()
+    for i=#self.CraftQueue,1,-1 do
+        local c = self.CraftQueue[i]
+        if now >= c.time then
+            local o = c.out
+            self:Add(o.name,o.amount or 1,o.meta or {})
+            table.remove(self.CraftQueue,i)
+        end
+    end
+end
+
+function Inv:Trade(target,give,recv)
+    for n,q in pairs(give) do
+        if not self:Has(n,q) then return false end
+    end
+    for n,q in pairs(recv) do
+        if not target:Has(n,q) then return false end
+    end
+    for n,q in pairs(give) do
+        self:Remove(n,q)
+        target:Add(n,q,self.Meta[n])
+    end
+    for n,q in pairs(recv) do
+        target:Remove(n,q)
+        self:Add(n,q,target.Meta[n])
+    end
+    return true
+end
+
+function Inv:Clear()
+    self:Backup()
+    self.Items = {}
+    self.Meta = {}
+    self.Modifiers = {}
+    self.Durability = {}
+    self.Equipped = {Weapon=nil,Armor=nil,Accessory=nil,Extra=nil}
+    self.Buffs = {}
+    self.Weight = 0
+    if self.AutoSave then self:Save() end
+end
+
+function Inv:Serialize()
+    return HttpService:JSONEncode({
+        items=self.Items,
+        meta=self.Meta,
+        mods=self.Modifiers,
+        dura=self.Durability,
+        eq=self.Equipped,
+        buffs=self.Buffs,
+        weight=self.Weight,
+        bank=self.Bank,
+        bankw=self.BankWeight,
+        craft=self.CraftQueue
+    })
+end
+
+function Inv:Deserialize(j)
+    local d = HttpService:JSONDecode(j)
+    self.Items = d.items or {}
+    self.Meta = d.meta or {}
+    self.Modifiers = d.mods or {}
+    self.Durability = d.dura or {}
+    self.Equipped = d.eq or {}
+    self.Buffs = d.buffs or {}
+    self.Weight = d.weight or 0
+    self.Bank = d.bank or {}
+    self.BankWeight = d.bankw or 0
+    self.CraftQueue = d.craft or {}
+end
+
+function Inv:Save()
+    local key = tostring(self.Player.UserId)..":Main"
+    local data = self:Serialize()
+    pcall(function()
+        Store:SetAsync(key,data)
+    end)
+    self.LastSave = os.clock()
+end
+
+function Inv:Load()
+    local key = tostring(self.Player.UserId)..":Main"
+    local ok,data = pcall(function()
+        return Store:GetAsync(key)
+    end)
+    if ok and data then
+        self:Deserialize(data)
+    end
+end
+
+function Inv:Loop()
+    while self.AutoSave do
+        task.wait(1)
+        self:CraftTick()
+        if os.clock() - self.LastSave >= self.Interval then
+            self:Save()
+        end
+    end
+end
+
+Players.PlayerAdded:Connect(function(p)
+    local inv = Inv.new(p)
+    Global[p.UserId] = inv
+    inv:Load()
+end)
+
+Players.PlayerRemoving:Connect(function(p)
+    local inv = Global[p.UserId]
+    if inv then
+        inv:Save()
+        Global[p.UserId] = nil
+    end
+end)
+
+function Inv.Get(player)
+    return Global[player.UserId]
+end
+
+return Inv
